@@ -43,109 +43,67 @@ def require(**kwargs):
     print(f"[PyManager] Profile set for {caller_file}: {resolved_profile}")
 
 def get_caller_file():
-    for frame_info in inspect.stack()[2:]:
+    for frame_info in inspect.stack()[1:]:
         # Skip internal pymanager or importlib frames
         if 'importlib' not in frame_info.filename and 'pymanager' not in frame_info.filename:
             return os.path.abspath(frame_info.filename)
     return None
 
-def find_module_in_store(module_name, target_pkg, target_version):
-    """
-    Manually find and load the module from our central store.
-    """
-    cache_key = (target_pkg, target_version, module_name)
-    if cache_key in LOADED_MODULES_CACHE:
-        return LOADED_MODULES_CACHE[cache_key]
+class PyManagerFinder(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path, target=None):
+        base_module = fullname.split('.')[0]
         
-    store_path = os.path.join(STORE_DIR, target_pkg, target_version)
-    
-    # Temporarily set sys.path to just this directory to find the spec
-    old_path = sys.path[:]
-    sys.path = [store_path]
-    try:
-        spec = importlib.machinery.PathFinder.find_spec(module_name)
-    finally:
-        sys.path = old_path
-        
-    if not spec:
-        return None
-        
-    module = importlib.util.module_from_spec(spec)
-    
-    # Crucial: Register the file path as part of this profile!
-    # So if this module imports something else, we know its profile.
-    mod_file = os.path.abspath(spec.origin) if spec.origin else None
-    if mod_file:
-        # It inherits the dependencies of the package it belongs to
-        # But for simplicity, we'll map it to the exact same versions resolved
-        pass 
-        
-    # We execute the module. Note: any imports inside this module will call our custom_import!
-    LOADED_MODULES_CACHE[cache_key] = module
-    
-    # We need to temporarily set the caller's profile to this module so it inherits dependencies.
-    # Since we are executing it now, we can just let custom_import use the stack to find mod_file.
-    if mod_file:
-        # Find the profile from the original caller (we will just reuse the exact versions)
-        caller_file = get_caller_file()
-        if caller_file in FILE_PROFILES:
-            FILE_PROFILES[mod_file] = FILE_PROFILES[caller_file]
+        # Do not intercept built-ins or pymanager itself
+        if base_module == 'pymanager' or base_module in sys.builtin_module_names:
+            return None
             
-    spec.loader.exec_module(module)
-    return module
+        # Do not intercept standard library modules (Python 3.10+)
+        if hasattr(sys, 'stdlib_module_names') and base_module in sys.stdlib_module_names:
+            return None
+            
+        caller_file = get_caller_file()
+        db = load_db()
+        target_pkg = None
+        target_version = None
 
-def custom_import(name, globals=None, locals=None, fromlist=(), level=0):
-    caller_file = get_caller_file()
-    
-    # Determine base module
-    base_module = name.split('.')[0] if level == 0 else globals.get('__package__', '').split('.')[0]
-    if not base_module:
-        base_module = name.split('.')[0]
+        if caller_file and caller_file in FILE_PROFILES and FILE_PROFILES[caller_file]:
+            profile = FILE_PROFILES[caller_file]
+            for pkg_name, version in profile.items():
+                if pkg_name in db and version in db[pkg_name]:
+                    if base_module in db[pkg_name][version].get('modules', []):
+                        target_pkg = pkg_name
+                        target_version = version
+                        break
         
-    db = load_db()
-    target_pkg = None
-    target_version = None
-
-    if caller_file and caller_file in FILE_PROFILES and FILE_PROFILES[caller_file]:
-        profile = FILE_PROFILES[caller_file]
-        # Find which package provides this module based on profile
-        for pkg_name, version in profile.items():
-            if pkg_name in db and version in db[pkg_name]:
-                if base_module in db[pkg_name][version].get('modules', []):
+        if not target_pkg:
+            for pkg_name, versions in db.items():
+                try:
+                    from packaging.version import parse as parse_version
+                    latest_version = max(versions.keys(), key=parse_version)
+                except Exception:
+                    latest_version = max(versions.keys())
+                    
+                if base_module in versions[latest_version].get('modules', []):
                     target_pkg = pkg_name
-                    target_version = version
+                    target_version = latest_version
                     break
-    
-    # If no profile or not found in profile, fallback to the latest available in store
-    if not target_pkg:
-        for pkg_name, versions in db.items():
-            # Check if this package provides the module
-            # We just take the latest version and check its 'modules'
-            # Note: A proper search would check all versions, but latest is a good heuristic
-            from packaging.version import parse as parse_version
-            try:
-                latest_version = max(versions.keys(), key=parse_version)
-            except Exception:
-                latest_version = max(versions.keys())
+                    
+        if target_pkg and target_version:
+            store_path = os.path.join(STORE_DIR, target_pkg, target_version)
+            # Use standard PathFinder but ONLY looking in our isolated store_path
+            spec = importlib.machinery.PathFinder.find_spec(fullname, [store_path])
+            if spec:
+                # Inherit profile for sub-imports
+                mod_file = os.path.abspath(spec.origin) if spec.origin else None
+                if mod_file and caller_file and caller_file in FILE_PROFILES:
+                    FILE_PROFILES[mod_file] = FILE_PROFILES[caller_file]
+                return spec
                 
-            if base_module in versions[latest_version].get('modules', []):
-                target_pkg = pkg_name
-                target_version = latest_version
-                break
-                
-    if target_pkg:
-        # We must load it from the central store manually to bypass sys.modules
-        mod = find_module_in_store(name, target_pkg, target_version)
-        if mod:
-            if fromlist:
-                return mod
-            else:
-                return mod
+        return None
 
-    # Fallback to standard import
-    return original_import(name, globals, locals, fromlist, level)
-
-# Install the hook
-builtins.__import__ = custom_import
+# Install the hook at the front of sys.meta_path
+if not any(isinstance(finder, PyManagerFinder) for finder in sys.meta_path):
+    sys.meta_path.insert(0, PyManagerFinder())
 
 __all__ = ['require', 'absorb_packages']
+
