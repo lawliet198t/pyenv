@@ -7,16 +7,37 @@ import importlib.machinery
 from .resolver import resolve_tree
 from .store import absorb_packages, STORE_DIR, load_db
 
+def _auto_absorb():
+    """Fast check on startup to absorb any newly pip-installed packages automatically."""
+    import site
+    # Prevent infinite loops or breaking pip itself while it's installing
+    if sys.argv and ('pip' in sys.argv[0] or 'manage.py' in sys.argv[0] or 'mass_edit.py' in sys.argv[0]):
+        return
+        
+    user_site = site.getusersitepackages()
+    if not os.path.exists(user_site):
+        return
+        
+    # Check if any new packages were installed by looking for .dist-info
+    try:
+        has_new_packages = any(item.endswith('.dist-info') for item in os.listdir(user_site))
+        if has_new_packages:
+            print("[PyManager] Newly installed global packages detected! Auto-absorbing into central store...")
+            absorb_packages(os.path.expanduser("~"))
+    except Exception:
+        pass
+
+# Run auto-absorb instantly when pymanager is loaded
+_auto_absorb()
+
 original_import = builtins.__import__
 
 FILE_PROFILES = {}
-LOADED_MODULES_CACHE = {} # Keyed by (package_name, version, module_name)
 
 def require(**kwargs):
     """
     Called from inside a program to specify requirements for that file.
     If no kwargs are provided, it looks for requirements.txt in the same directory.
-    e.g. pymanager.require(requests=">=2.20", numpy="")
     """
     caller_frame = inspect.stack()[1]
     caller_file = os.path.abspath(caller_frame.filename)
@@ -29,7 +50,6 @@ def require(**kwargs):
                 for line in f:
                     line = line.strip()
                     if line and not line.startswith('#'):
-                        # Very simple parsing
                         import re
                         parts = re.split(r'([=><~]+)', line, 1)
                         if len(parts) == 3:
@@ -37,27 +57,51 @@ def require(**kwargs):
                         else:
                             kwargs[parts[0].strip()] = ""
                             
-    # Resolve the full dependency tree for this file
     resolved_profile = resolve_tree(kwargs)
     FILE_PROFILES[caller_file] = resolved_profile
     print(f"[PyManager] Profile set for {caller_file}: {resolved_profile}")
 
 def get_caller_file():
     for frame_info in inspect.stack()[1:]:
-        # Skip internal pymanager or importlib frames
         if 'importlib' not in frame_info.filename and 'pymanager' not in frame_info.filename:
             return os.path.abspath(frame_info.filename)
     return None
 
 class PyManagerFinder(importlib.abc.MetaPathFinder):
+    def find_distributions(self, context=None):
+        """Fixes importlib.metadata / pkg_resources DistributionNotFound errors"""
+        name = context.name if context else None
+        if not name:
+            return []
+            
+        db = load_db()
+        from importlib.metadata import PathDistribution
+        from pathlib import Path
+        
+        dists = []
+        if name in db:
+            # For simplicity, we just return the latest version's distribution data
+            # since find_distributions is usually queried globally.
+            try:
+                from packaging.version import parse as parse_version
+                latest_version = max(db[name].keys(), key=parse_version)
+            except Exception:
+                latest_version = max(db[name].keys())
+                
+            store_path = os.path.join(STORE_DIR, name, latest_version)
+            if os.path.exists(store_path):
+                for item in os.listdir(store_path):
+                    if item.endswith('.dist-info'):
+                        dists.append(PathDistribution(Path(os.path.join(store_path, item))))
+                        break
+        return dists
+
     def find_spec(self, fullname, path, target=None):
         base_module = fullname.split('.')[0]
         
-        # Do not intercept built-ins or pymanager itself
         if base_module == 'pymanager' or base_module in sys.builtin_module_names:
             return None
             
-        # Do not intercept standard library modules (Python 3.10+)
         if hasattr(sys, 'stdlib_module_names') and base_module in sys.stdlib_module_names:
             return None
             
@@ -90,10 +134,8 @@ class PyManagerFinder(importlib.abc.MetaPathFinder):
                     
         if target_pkg and target_version:
             store_path = os.path.join(STORE_DIR, target_pkg, target_version)
-            # Use standard PathFinder but ONLY looking in our isolated store_path
             spec = importlib.machinery.PathFinder.find_spec(fullname, [store_path])
             if spec:
-                # Inherit profile for sub-imports
                 mod_file = os.path.abspath(spec.origin) if spec.origin else None
                 if mod_file and caller_file and caller_file in FILE_PROFILES:
                     FILE_PROFILES[mod_file] = FILE_PROFILES[caller_file]
