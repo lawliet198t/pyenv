@@ -2,6 +2,7 @@ import sys
 import os
 import builtins
 import inspect
+import importlib.abc
 import importlib.util
 import importlib.machinery
 from .resolver import resolve_tree
