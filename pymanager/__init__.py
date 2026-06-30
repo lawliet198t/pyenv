@@ -23,8 +23,13 @@ def _auto_absorb():
     try:
         has_new_packages = any(item.endswith('.dist-info') for item in os.listdir(user_site))
         if has_new_packages:
-            print("[PyManager] Newly installed global packages detected! Auto-absorbing into central store...")
-            absorb_packages(os.path.expanduser("~"))
+            old_stdout = sys.stdout
+            try:
+                sys.stdout = sys.stderr
+                print("[PyManager] Newly installed global packages detected! Auto-absorbing into central store...")
+                absorb_packages(os.path.expanduser("~"))
+            finally:
+                sys.stdout = old_stdout
     except Exception:
         pass
 
@@ -60,7 +65,7 @@ def require(**kwargs):
                             
     resolved_profile = resolve_tree(kwargs)
     FILE_PROFILES[caller_file] = resolved_profile
-    print(f"[PyManager] Profile set for {caller_file}: {resolved_profile}")
+    print(f"[PyManager] Profile set for {caller_file}: {resolved_profile}", file=sys.stderr)
 
 def get_caller_file():
     for frame_info in inspect.stack()[1:]:
