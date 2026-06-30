@@ -65,7 +65,6 @@ def require(**kwargs):
                             
     resolved_profile = resolve_tree(kwargs)
     FILE_PROFILES[caller_file] = resolved_profile
-    print(f"[PyManager] Profile set for {caller_file}: {resolved_profile}", file=sys.stderr)
 
 def get_caller_file():
     for frame_info in inspect.stack()[1:]:
