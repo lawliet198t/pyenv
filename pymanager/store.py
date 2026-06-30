@@ -26,6 +26,11 @@ def save_db(db):
     os.replace(tmp_path, DB_PATH)
 
 def find_site_packages(root_dir):
+    # Check if root_dir itself is a site-packages equivalent (e.g. from manage.py install tmpdir)
+    has_dist_info = any(f.endswith('.dist-info') for f in os.listdir(root_dir)) if os.path.exists(root_dir) else False
+    if has_dist_info:
+        yield root_dir
+        
     ignore_dirs = {'.git', 'node_modules', '__pycache__', '.cache', 'Downloads', 'Documents', 'Pictures', 'central_store', 'pymanager'}
     for dirpath, dirnames, filenames in os.walk(root_dir):
         dirnames[:] = [d for d in dirnames if d not in ignore_dirs and not d.startswith('.npm')]
@@ -92,23 +97,26 @@ def absorb_packages(root_dir):
                         if name not in db:
                             db[name] = {}
                             
-                        top_level_path = os.path.join(dist_info_dir, 'top_level.txt')
                         modules = []
-                        if os.path.exists(top_level_path):
-                            with open(top_level_path, 'r') as f:
-                                modules = [m.strip() for m in f.readlines() if m.strip()]
-                        else:
-                            record_path = os.path.join(dist_info_dir, 'RECORD')
-                            if os.path.exists(record_path):
-                                with open(record_path, 'r') as f:
-                                    for line in f:
-                                        filepath = line.split(',')[0]
-                                        top_dir = filepath.split('/')[0].split('\\')[0]
-                                        if not top_dir.endswith('.dist-info') and top_dir not in modules:
-                                            if top_dir.endswith('.py'): top_dir = top_dir[:-3]
-                                            modules.append(top_dir)
-                            if not modules:
-                                modules = [pkg_info['name'].replace('-', '_')]
+                        record_path = os.path.join(dist_info_dir, 'RECORD')
+                        if os.path.exists(record_path):
+                            with open(record_path, 'r') as f:
+                                for line in f:
+                                    filepath = line.split(',')[0]
+                                    top_dir = filepath.split('/')[0].split('\\')[0]
+                                    if top_dir in ('.', '..'): continue
+                                    if not top_dir.endswith('.dist-info') and top_dir not in modules:
+                                        if top_dir.endswith('.py'): top_dir = top_dir[:-3]
+                                        modules.append(top_dir)
+                                        
+                        if not modules:
+                            top_level_path = os.path.join(dist_info_dir, 'top_level.txt')
+                            if os.path.exists(top_level_path):
+                                with open(top_level_path, 'r') as f:
+                                    modules = [m.strip() for m in f.readlines() if m.strip()]
+                                    
+                        if not modules:
+                            modules = [pkg_info['name'].replace('-', '_')]
                                 
                         if version not in db[name]:
                             print(f"Moving new package to central store: {name} v{version}")
