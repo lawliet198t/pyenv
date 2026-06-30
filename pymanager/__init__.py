@@ -139,7 +139,8 @@ class PyManagerFinder(importlib.abc.MetaPathFinder):
                     
         if target_pkg and target_version:
             store_path = os.path.join(STORE_DIR, target_pkg, target_version)
-            spec = importlib.machinery.PathFinder.find_spec(fullname, [store_path])
+            search_paths = path if path is not None else [store_path]
+            spec = importlib.machinery.PathFinder.find_spec(fullname, search_paths)
             if spec:
                 mod_file = os.path.abspath(spec.origin) if spec.origin else None
                 if mod_file and caller_file and caller_file in FILE_PROFILES:
